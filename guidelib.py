@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#! /usr/bin/env python
 
 ## Author: Andrew Hren
 ## Email: Andrew.Hren@colorado.edu
@@ -9,6 +9,7 @@ import pandas
 import time
 from collections import Counter
 from ast import literal_eval
+import argparse
 
 #clear the existing file and add a header line
 
@@ -81,17 +82,14 @@ def create_list(PAM_type,filename):
     master_component = []
     master_strand = []
     master_spacer = []
+    component_list = []
     
     it = iter(enumerate(SeqIO.parse(filename,'genbank')))
-    
     for index, record in it:
         data[str(record.id)] = record
         #save file data to a dictionary
         component = data[str(record.id)]
-        print('Moving to component ' + component.id)
-    
-        print('Length: ' + str(len(component.seq)))
-        #print(sequence)
+        component_list.append(record.id)
         sequence = component.seq
         
         if PAM_type == 'NGG':        
@@ -137,6 +135,10 @@ def create_list(PAM_type,filename):
     all_pams['Strand'] = pandas.Series(master_strand)
     all_pams['Component'] = pandas.Series(master_component)
     all_pams['index'] = all_pams.index
+    
+    component_list = sorted(list(set(component_list)))
+    if PAM_type == "NGG":
+        print("indexed components: " + str(component_list))
     
     
     
@@ -190,14 +192,14 @@ def gene_targeting_filter(data_df,filename):
                 #the order and add a column with the corresopnding locus_tags
                 #without worrying about the order being switched 
                 
-                noncoding_df_fin = noncoding_df_fin.append(noncoding_df)
-                coding_df_fin = coding_df_fin.append(coding_df)
+                noncoding_df_fin = pandas.concat([noncoding_df_fin, noncoding_df],axis=0)
+                coding_df_fin = pandas.concat([coding_df_fin, coding_df],axis=0)
                 
-                #cod_feature_index.extend(feature.qualifiers['locus_tag'] for i in range(len(coding_df)))
-                #feature_index.extend(feature.qualifiers['locus_tag'] for i in range(len(noncoding_df)))
+                cod_feature_index.extend(feature.qualifiers['locus_tag'] for i in range(len(coding_df)))
+                feature_index.extend(feature.qualifiers['locus_tag'] for i in range(len(noncoding_df)))
                 
-                cod_feature_index.extend(feature.qualifiers['db_xref'][0] for i in range(len(coding_df)))
-                feature_index.extend(feature.qualifiers['db_xref'][0] for i in range(len(noncoding_df)))
+                #cod_feature_index.extend(feature.qualifiers['db_xref'][0] for i in range(len(coding_df)))
+                #feature_index.extend(feature.qualifiers['db_xref'][0] for i in range(len(noncoding_df)))
                  
     noncoding_df_fin['locus_tag'] = feature_index    
     coding_df_fin['locus_tag'] = cod_feature_index
@@ -206,7 +208,6 @@ def gene_targeting_filter(data_df,filename):
     #noncoding_df_fin.to_csv('noncoding_df_fin.csv')
     #coding_df_fin.to_csv('coding_df_fin.csv')
     
-    print('done')
     
     return noncoding_df_fin, coding_df_fin
 
@@ -241,8 +242,7 @@ def seed_comparison(all_pams,strand1df,strand2df):
     
     seed_lengths = [i for i in range(4,21)] #10,11,12, etc
     seed_lib = {}
-    
-    start = time.perf_counter()   
+
     
     #creates a dictionary of dictionaries, each with spacers truncated to 
     #a certain seed truncation
@@ -264,10 +264,6 @@ def seed_comparison(all_pams,strand1df,strand2df):
             if cnt[seq] == 1:
                 new_lib[lib][pamindex] = seq
         
-    
-       
-    finish = time.perf_counter()
-    print(f'It took {finish-start} seconds')
     
     scores = {}
     seed_lib = dict(reversed(list(seed_lib.items())))
@@ -326,14 +322,17 @@ def top_guides(guides_per_locus,noncoding_scores, coding_scores):
         gene_guides = gene_guides.sort_values(by='score')
         gene_guides['target'] = 'coding'
         top_picks = gene_guides.head(guides_per_locus)
-        library_list = pandas.concat([top_picks,library_list],sort=True)
+        if library_list.empty:
+            library_list = top_picks
+        else:
+            library_list = pandas.concat([top_picks,library_list],sort=True)
         
         
         if len(top_picks) != guides_per_locus:
             coding_guides = data2[data2['locus_tag'] == locus]
             coding_guides = coding_guides.sort_values(by='score')
             remain = guides_per_locus - len(top_picks)
-            fill_picks = coding_guides.head(remain)
+            fill_picks = coding_guides.head(remain).copy()
             fill_picks['target'] = 'noncoding'
             library_list = pandas.concat([fill_picks,library_list],sort=True)
             
@@ -348,68 +347,45 @@ def top_guides(guides_per_locus,noncoding_scores, coding_scores):
 
 #######
 
-def run(filename):
+def run(args):
     start = time.perf_counter()
-    print('NGG PAMs')
-    NGG_pams                    = create_list('NGG',filename)    
-    print('NAG PAMs now')
-    NAG_pams                    = create_list('NAG',filename)
+    print('indexing PAMs')
+    NGG_pams                    = create_list('NGG',args.input)    
+    NAG_pams                    = create_list('NAG',args.input)
     all_pams                    = pandas.concat([NGG_pams,NAG_pams]) 
-    noncoding_df,coding_df      = gene_targeting_filter(all_pams,filename)
-    
+    noncoding_df,coding_df      = gene_targeting_filter(all_pams,args.input)
     finish = time.perf_counter()
-    print(f'It took {finish-start} seconds')
+    duration = round(finish-start,2)
+    print(f'It took {duration} seconds')
+    
     start = time.perf_counter()      
-           
-    
-    noncoding_scores            = seed_comparison(all_pams,noncoding_df)
-    
+    non_scores, cod_scores      =    seed_comparison(all_pams,noncoding_df,coding_df)
+    non_scores['locus_tag']     =    non_scores.apply(fix_format,axis=1)
+    cod_scores['locus_tag']     =    cod_scores.apply(fix_format,axis=1)
     finish = time.perf_counter()
-    print(f'It took {finish-start} seconds')
-    start = time.perf_counter()   
-    
-    coding_scores               = seed_comparison(all_pams,coding_df)
-    
-    finish = time.perf_counter()
-    print(f'It took {finish-start} seconds')
-    start = time.perf_counter()   
-    
-    noncoding_list,coding_list  = top_guides(noncoding_scores,coding_scores)
+    duration = round(finish-start,2)
+    print(f'It took {duration} seconds')
 
     
-    finish = time.perf_counter()
-    print(f'It took {finish-start} seconds')
+    library_list = top_guides(args.guidecount,non_scores,cod_scores)
+    library_list.to_csv(args.output,index=False)
+
+    print("DONE")
 
 
 
 
-
-
-
-filename = 'RAST_annotated_GB03.gbk'
-start = time.perf_counter()
-print('NGG PAMs')
-NGG_pams                    = create_list('NGG',filename)    
-print('NAG PAMs now')
-NAG_pams                    = create_list('NAG',filename)
-all_pams                    = pandas.concat([NGG_pams,NAG_pams])
-
-       
-noncoding_df,coding_df      = gene_targeting_filter(all_pams,filename)
-
-finish = time.perf_counter()
-print(f'It took {finish-start} seconds')
-
-
-non_scores, cod_scores      = seed_comparison(all_pams,noncoding_df,coding_df)
-non_scores['locus_tag']     =    non_scores.apply(fix_format,axis=1)
-cod_scores['locus_tag']     =    cod_scores.apply(fix_format,axis=1)
-
-library_list = top_guides(10,non_scores,cod_scores)
-library_list.to_csv('GBO3_targeting.csv')
-#run(filename)
-
-
+def main():
+    parser=argparse.ArgumentParser(description="Generate a CRISPRi library from a GenBank genome assembly")
+    parser.add_argument("-in",help="genbank assembly filename (.gbff)", dest="input", type=str, required=True)
+    parser.add_argument("-out", help="CSV output filename", dest="output", type=str, required=True)
+    parser.add_argument("--guidecount", help="Number of guides per gene (default = 10)", dest="guidecount", type=int, default=10)
+    parser.set_defaults(func=run)
+    args=parser.parse_args() 
+    args.func(args)
+    
+if __name__=="__main__":
+    main()
 
             
 
